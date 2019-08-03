@@ -131,6 +131,11 @@ static pthread_mutex_t log_locker;
 #define DEFAULT_LOG_FMT			""
 #define DEFAULT_LOG_EXT			".log"
 #define DEFAULT_LOG_PATH		"." PATH_SEPARATOR
+#define DEFAULT_LOG_CONS		0xFF
+#define NEED_LOG_CONS(X)		(X!=0x00)
+#define LOG_FILE_FORMAT			"%Y-%m-%d %H:%M:%S"
+#define LOG_LR					'\r'
+#define LOG_CF					'\n'
 
 #pragma pack (1)
 struct log_arg {
@@ -139,17 +144,16 @@ struct log_arg {
 	long idx;
 	time_t ftime;
 	char fname[64];
-	char data[DATA_SIZE];
 	char lname[MAX_LOG_PATH];
 };
 struct log_set {
+	long args;
 	int level;
 	char ext[8];
 	char fmt[64];
 	__off_t limit;
 	long rotatetime;
-	long args;
-	unsigned char console;
+	unsigned char cons;
 	char path[MAX_LOG_PATH];
 	struct log_arg* argl;
 };
@@ -180,6 +184,7 @@ static const char* p_log_level_name[LOG_MAX] = {
 	"TRACE",
 	"VERBOSE"
 };
+#define NONE_COLOR	"\033[00m"
 static const char* p_log_level_color[LOG_MAX] = {
 	"\033[30m",
 	"\033[31m",
@@ -221,9 +226,9 @@ int get_log_top_level()
 	return p_log_set->level;
 }
 __inline static
-unsigned char get_log_console()
+unsigned char get_log_cons()
 {
-	return p_log_set->console;
+	return p_log_set->cons;
 }
 __inline static
 const char* get_log_level_name(int level)
@@ -238,12 +243,12 @@ const char* get_log_level_color(int level)
 __inline static
 const char* get_log_level_color_end()
 {
-	return "\033[0m";
+	return NONE_COLOR;
 }
 __inline static
 struct log_arg* get_log_arg(const char* fname)
 {
-	for (size_t i = 0; i < p_log_set->args; i++)
+	for (long i = 0; i < p_log_set->args; i++)
 	{
 		if (strcasecmp(p_log_set->argl[i].fname, fname) == 0)
 		{
@@ -279,7 +284,7 @@ int exit_log()
 	return 0;
 }
 __inline static
-struct log_set* init_log(const char* path, const char* fmt, const char* ext, 
+struct log_set* init_log(const char* path, const char* fmt, const char* ext, unsigned char cons,
 	long rotatetime, int level, long limit, const struct log_arg* pargl, unsigned long args)
 {
 	char* p = 0;
@@ -309,16 +314,17 @@ struct log_set* init_log(const char* path, const char* fmt, const char* ext,
 		snprintf(lpath, sizeof(lpath) / sizeof(*lpath), "%.*s\0", (int)((++p) - path), path);
 		make_dir(lpath);
 	}
-	snprintf(p_log_set->path, sizeof(p_log_set->path) / sizeof(*(p_log_set->path)), "%s", (path != 0) ? (path) : DEFAULT_LOG_PATH);
+	snprintf(p_log_set->path, sizeof(p_log_set->path) / sizeof(*(p_log_set->path)), "%s\0", (path != 0) ? (path) : DEFAULT_LOG_PATH);
 	if ((p_log_set->path[strlen(p_log_set->path) - 1] != PATH_SEPARATOR_CHAR))
 	{
 		p_log_set->path[strlen(p_log_set->path)] = PATH_SEPARATOR_CHAR;
 	}
 
-	snprintf(p_log_set->fmt, sizeof(p_log_set->fmt) / sizeof(*(p_log_set->fmt)), "%s", (fmt != 0) ? (fmt) : "");
-	snprintf(p_log_set->ext, sizeof(p_log_set->ext) / sizeof(*(p_log_set->ext)), "%s", (path != 0) ? (ext) : DEFAULT_LOG_EXT);
+	snprintf(p_log_set->fmt, sizeof(p_log_set->fmt) / sizeof(*(p_log_set->fmt)), "%s\0", (fmt != 0) ? (fmt) : "");
+	snprintf(p_log_set->ext, sizeof(p_log_set->ext) / sizeof(*(p_log_set->ext)), "%s\0", (path != 0) ? (ext) : DEFAULT_LOG_EXT);
 	p_log_set->level = IS_VALID_LOG_LEVEL_TYPE(level) ? level : LOG_VERBOSE;
 	p_log_set->limit = limit > 0 ? limit : DEFAULT_LOG_LIMIT_SIZE;
+	p_log_set->cons = cons;
 	p_log_set->args = args;
 	p_log_set->rotatetime = rotatetime > 0 ? rotatetime : DAY_SECONDS;
 	p_log_set->argl = (struct log_arg*)malloc(p_log_set->args * sizeof(struct log_arg));
@@ -333,13 +339,13 @@ struct log_set* init_log(const char* path, const char* fmt, const char* ext,
 	log_secs = tv.tv_sec;
 	log_secs -= log_secs % p_log_set->rotatetime;
 
-	for (size_t i = 0; i < p_log_set->args; i++)
+	for (long i = 0; i < p_log_set->args; i++)
 	{
 		nCount = 0;
 		memcpy(&p_log_set->argl[i], &pargl[i], sizeof(struct log_arg));
 
 		nCount += snprintf(lname + nCount, sizeof(lname) / sizeof(*lname), "%s%s\0", p_log_set->path, p_log_set->argl[i].fname);
-						
+		
 		if (*p_log_set->fmt)
 		{
 			tm_log = localtime(&log_secs);
@@ -373,37 +379,27 @@ struct log_set* init_log(const char* path, const char* fmt, const char* ext,
 }
 
 __inline static
-int check_log(struct log_arg* pla, struct tm* tm_now, long * tm_now_usec)
+int check_log(struct log_arg* pla, time_t now_secs)
 {
-	int nCount = 0; 
-	time_t now_secs = 0;
-	time_t log_secs = 0;
-	struct tm* tm_log = 0;
+	int nCount = 0;
+	time_t fsecs = 0;
 	struct stat st = { 0 };
-	struct timeval tv = { 0 };
-	struct timezone tz = { 0 };
 	__off_t limit = get_log_limit();
 	const char* ext = get_log_ext();
 	const char* fmt = get_log_fmt();
 	char lname[MAX_LOG_PATH] = { 0 };
 	const char* path = get_log_path();
 
-	gettimeofday(&tv, &tz);
-	log_secs = now_secs = tv.tv_sec;
-	(*tm_now_usec) = tv.tv_usec;
-	memcpy(tm_now, localtime(&now_secs), sizeof(struct tm));
+	fsecs = now_secs - now_secs % get_log_rotatetime();
 
-	log_secs -= log_secs % get_log_rotatetime();
-
-	if(pla->ftime != log_secs)
+	if(pla->ftime != fsecs)
 	{
-		pla->ftime = log_secs;
+		pla->ftime = fsecs;
 
 		nCount += snprintf(lname + nCount, sizeof(lname) / sizeof(*lname), "%s%s\0", path, pla->fname);
 		if (*fmt)
 		{
-			tm_log = localtime(&log_secs);
-			nCount += (int)(strftime(lname + nCount, sizeof(lname) / sizeof(*lname), fmt, tm_log));
+			nCount += (int)(strftime(lname + nCount, sizeof(lname) / sizeof(*lname), fmt, localtime(&fsecs)));
 			nCount += snprintf(lname + nCount, sizeof(lname) / sizeof(*lname), "%s\0", ext);
 
 			close(pla->fd);
@@ -463,8 +459,7 @@ int check_log(struct log_arg* pla, struct tm* tm_now, long * tm_now_usec)
 				nCount += snprintf(lname + nCount, sizeof(lname) / sizeof(*lname), "%s%s\0", path, pla->fname);
 				if (*fmt)
 				{
-					tm_log = localtime(&now_secs);
-					nCount += (int)(strftime(lname + nCount, sizeof(lname) / sizeof(*lname), fmt, tm_log));
+					nCount += (int)(strftime(lname + nCount, sizeof(lname) / sizeof(*lname), fmt, localtime(&now_secs)));
 				}
 				nCount += snprintf(lname + nCount, sizeof(lname) / sizeof(*lname), "%s\0", ext);
 				snprintf(pla->lname, sizeof(pla->lname) / sizeof(*pla->lname), "%s\0", lname);
@@ -527,50 +522,59 @@ __inline static
 int log(const char* fname, int level, const char* fmt, ...)
 {
 	va_list arg;
-	int date_len = 0;
-	long tm_now_usec = 0;
+	int data_len = 0;
+	long tt_now_usecs = 0;
 	struct stat st = { 0 };
-	struct tm tm_now = { 0 };
+	struct tm * tm_now = 0;
+	time_t tt_now_secs = 0;
 	struct log_arg* pla = 0;
+	struct timeval tv = { 0 };
+	struct timezone tz = { 0 };
+	char date_time[128] = { 0 };
+	char data[DATA_SIZE] = { 0 };
 
-	log_lock();
 	// 若level大于指定的level,则不打印日志信息
 	if (level > get_log_top_level())
 	{
-		log_unlock();
 		return (-1);
 	}
 
 	if ((pla = get_log_arg(fname)) == 0)
 	{
-		log_unlock();
 		return (-1);
 	}
-	
-	check_log(pla, &tm_now, &tm_now_usec);
-	
+
+	gettimeofday(&tv, &tz);
+	tt_now_secs = tv.tv_sec;
+	tt_now_usecs = tv.tv_usec;
+	tm_now = localtime(&tt_now_secs);
+
+	strftime(date_time, sizeof(date_time) / sizeof(*date_time), LOG_FILE_FORMAT, tm_now);
+	data_len += snprintf(data + data_len, DATA_SIZE, "%s[%s.%ld][%ld][%C]\0",
+		get_log_level_color(level), date_time, tt_now_usecs, sys_get_tid(), *get_log_level_name(level));
 	va_start(arg, fmt);
-	date_len += snprintf(pla->data+ date_len, DATA_SIZE,
-		"%s[%04d-%02d-%02d_%02d:%02d:%02d.%06d:%ld:%C]",
-		get_log_level_color(level),
-		tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
-		tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec, tm_now_usec,
-		sys_get_tid(), *get_log_level_name(level));
-	date_len += vsnprintf(pla->data + date_len, DATA_SIZE, fmt, arg);
-	date_len += snprintf(pla->data + date_len, DATA_SIZE, "%s\n", get_log_level_color_end());
-	if (get_log_console() != 0x00)
-	{
-		if(isatty(LOG_STDOUT_FILENO) != 0)
-		{
-			//printf("%.*s", date_len, pla->data);
-			write(LOG_STDOUT_FILENO, pla->data, date_len);
-		}
-	}
-	write(pla->fd, pla->data, date_len);
+	data_len += vsnprintf(data + data_len, DATA_SIZE, fmt, arg);
 	va_end(arg);
+	if (LOG_CF == data[data_len - 1])
+	{
+		data_len--;
+		if (LOG_LR == data[data_len - 1])
+		{
+			data_len--;
+		}
+	}	
+	data_len += snprintf(data + data_len, DATA_SIZE, "%s\n\0", get_log_level_color_end());
 
+	log_lock();
+	check_log(pla, tt_now_secs);
+	write(pla->fd, data, data_len);
+	if (NEED_LOG_CONS(get_log_cons()))
+	{
+		//printf("%.*s", data_len, data);
+		write(LOG_STDOUT_FILENO, data, data_len);
+	}
 	log_unlock();
-
+	
 	return (0);
 }
 
@@ -590,23 +594,23 @@ log_task(void * p) {
 
 	for (size_t i = 0; i < 1000; i++)
 	{
-		log("main", LOG_INFO, "%s(%d)", "I am test!!!!!!", i);
-		LOG(main, LOG_WARN, "%s(%d)", "I am test!!!!!!", i);
-		LOG(main, LOG_TRACE, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_ERROR, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_FATAL, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_WARN, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_TRACE, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_DEBUG, "%s(%d)", "I am test!!!!!!", i);
-		
-		log("main1", LOG_INFO, "%s(%d)", "I am test!!!!!!", i);
-		LOG(main1, LOG_WARN, "%s(%d)", "I am test!!!!!!", i);
-		LOG(main1, LOG_TRACE, "%s(%d)", "I am test!!!!!!", i);
-		log("main1", LOG_ERROR, "%s(%d)", "I am test!!!!!!", i);
-		log("main1", LOG_FATAL, "%s(%d)", "I am test!!!!!!", i);
-		log("main1", LOG_WARN, "%s(%d)", "I am test!!!!!!", i);
-		log("main1", LOG_TRACE, "%s(%d)", "I am test!!!!!!", i);
-		log("main1", LOG_DEBUG, "%s(%d)", "I am test!!!!!!", i);
+		log("main", LOG_INFO, "%s(%d)\n", "I am test!!!!!!", i);
+		LOG(main, LOG_WARN, "%s(%d)\n", "I am test!!!!!!", i);
+		LOG(main, LOG_TRACE, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_ERROR, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_FATAL, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_WARN, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_TRACE, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_DEBUG, "%s(%d)\n", "I am test!!!!!!", i);
+
+		log("main1", LOG_INFO, "%s(%d)\n", "I am test!!!!!!", i);
+		LOG(main1, LOG_WARN, "%s(%d)\n", "I am test!!!!!!", i);
+		LOG(main1, LOG_TRACE, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main1", LOG_ERROR, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main1", LOG_FATAL, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main1", LOG_WARN, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main1", LOG_TRACE, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main1", LOG_DEBUG, "%s(%d)\n", "I am test!!!!!!", i);
 #if defined(_MSC_VER) || defined(_MSC_EXTENSIONS)
 		//_sleep(1000);
 	}
@@ -622,34 +626,26 @@ log_task(void * p) {
 __inline static 
 int log_test_main()
 {
-	printf("hello from mylog!\n");
-	char test[10240] = { 0 };
-	int count = snprintf(test, 10240, "%s\n", "1234");
-	printf("%s\n", test);
-	count += snprintf(test + count, 10240, "%s\n", "1234");
-	printf("%s\n", test);
-	count += snprintf(test + count, 10240, "%s\n", "1234");
-	printf("%s\n", test);
-
 	const struct log_arg largl[] = {
 		{-1,30,0,0,"main",""},
 		{-1,30,0,0,"main1",""},
 	};
 	long n_rotatetime = 10;//DEFAULT_LOG_ROTATETIME
 	const char* log_fmt = "%Y-%m-%d-%H-%M-%S";// DEFAULT_LOG_FMT;
-	init_log(DEFAULT_LOG_PATH, log_fmt, DEFAULT_LOG_EXT,
+	init_log(DEFAULT_LOG_PATH, log_fmt, DEFAULT_LOG_EXT, DEFAULT_LOG_CONS,
 		n_rotatetime, LOG_VERBOSE, DEFAULT_LOG_LIMIT_SIZE, largl, sizeof(largl) / sizeof(*largl));
 	for (size_t i = 0; i < 100; i++)
 	{
-		LOG(main, LOG_INFO, "%s(%d)", "I am test!!!!!!", i);
-		LOG(main1, LOG_INFO, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_ERROR, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_FATAL, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_WARN, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_TRACE, "%s(%d)", "I am test!!!!!!", i);
-		log("main", LOG_DEBUG, "%s(%d)", "I am test!!!!!!", i);
-		log("main1", LOG_INFO, "%s(%d)", "I am test!!!!!!", i);
+		LOG(main, LOG_INFO, "%s(%d)\n", "I am test!!!!!!", i);
+		LOG(main1, LOG_INFO, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_ERROR, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_FATAL, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_WARN, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_TRACE, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main", LOG_DEBUG, "%s(%d)\n", "I am test!!!!!!", i);
+		log("main1", LOG_INFO, "%s(%d)\n", "I am test!!!!!!", i);
 	}
+
 	int ret = 0;
 #if defined(_MSC_VER) || defined(_MSC_EXTENSIONS)
 	DWORD t[4] = { 0 };
