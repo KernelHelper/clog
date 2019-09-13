@@ -145,6 +145,8 @@ struct log_arg {
 	time_t ftime;
 	char fname[64];
 	char lname[MAX_LOG_PATH];
+	long size;
+	char* data;
 };
 struct log_set {
 	long args;
@@ -269,8 +271,13 @@ int exit_log()
 				if (p_log_set->argl[i].fd != (-1))
 				{
 					close(p_log_set->argl[i].fd);
+					p_log_set->argl[i].fd = (-1);
 				}
-				p_log_set->argl[i].fd = (-1);
+				if (p_log_set->argl[i].data != 0)
+				{
+					free(p_log_set->argl[i].data);
+					p_log_set->argl[i].data = 0;
+				}
 			}
 			free(p_log_set->argl);
 			p_log_set->argl = (0);
@@ -344,6 +351,12 @@ struct log_set* init_log(const char* path, const char* fmt, const char* ext, uns
 		nCount = 0;
 		memcpy(&p_log_set->argl[i], &pargl[i], sizeof(struct log_arg));
 
+		p_log_set->argl[i].data = (char*)malloc(p_log_set->argl[i].size);
+		if(p_log_set->argl[i].data == 0)
+		{
+			exit_log();
+			return (0);
+		}
 		nCount += snprintf(lname + nCount, sizeof(lname) / sizeof(*lname), "%s%s\0", p_log_set->path, p_log_set->argl[i].fname);
 		
 		if (*p_log_set->fmt)
@@ -482,7 +495,7 @@ int check_log(struct log_arg* pla, time_t now_secs)
 		}
 		else
 		{
-			if (st.st_size + DATA_SIZE >= limit)
+			if (st.st_size + pla->size >= limit)
 			{
 				if (pla->num > 0)
 				{
@@ -531,7 +544,6 @@ int log(const char* fname, int level, const char* fmt, ...)
 	struct timeval tv = { 0 };
 	struct timezone tz = { 0 };
 	char date_time[128] = { 0 };
-	char data[DATA_SIZE] = { 0 };
 
 	// 若level大于指定的level,则不打印日志信息
 	if (level > get_log_top_level())
@@ -544,34 +556,37 @@ int log(const char* fname, int level, const char* fmt, ...)
 		return (-1);
 	}
 
+	log_lock();
+
+	memset(pla->data, 0, pla->size);
+
 	gettimeofday(&tv, &tz);
 	tt_now_secs = tv.tv_sec;
 	tt_now_usecs = tv.tv_usec;
 	tm_now = localtime(&tt_now_secs);
 
 	strftime(date_time, sizeof(date_time) / sizeof(*date_time), LOG_FILE_FORMAT, tm_now);
-	data_len += snprintf(data + data_len, DATA_SIZE, "%s[%s.%ld][%ld][%C]\0",
+	data_len += snprintf(pla->data + data_len, pla->size, "%s[%s.%ld][%ld][%C]\0",
 		get_log_level_color(level), date_time, tt_now_usecs, sys_get_tid(), *get_log_level_name(level));
 	va_start(arg, fmt);
-	data_len += vsnprintf(data + data_len, DATA_SIZE, fmt, arg);
+	data_len += vsnprintf(pla->data + data_len, pla->size, fmt, arg);
 	va_end(arg);
-	if (LOG_CF == data[data_len - 1])
+	if (LOG_CF == pla->data[data_len - 1])
 	{
 		data_len--;
-		if (LOG_LR == data[data_len - 1])
+		if (LOG_LR == pla->data[data_len - 1])
 		{
 			data_len--;
 		}
 	}	
-	data_len += snprintf(data + data_len, DATA_SIZE, "%s\n\0", get_log_level_color_end());
+	data_len += snprintf(pla->data + data_len, pla->size, "%s\n\0", get_log_level_color_end());
 
-	log_lock();
 	check_log(pla, tt_now_secs);
-	write(pla->fd, data, data_len);
+	write(pla->fd, pla->data, data_len);
 	if (NEED_LOG_CONS(get_log_cons()))
 	{
 		//printf("%.*s", data_len, data);
-		write(LOG_STDOUT_FILENO, data, data_len);
+		write(LOG_STDOUT_FILENO, pla->data, data_len);
 	}
 	log_unlock();
 	
@@ -627,11 +642,11 @@ __inline static
 int log_test_main()
 {
 	const struct log_arg largl[] = {
-		{-1,30,0,0,"main",""},
-		{-1,30,0,0,"main1",""},
+		{-1,30,0,0,"main","", DATA_SIZE, 0},
+		{-1,30,0,0,"main1","", DATA_SIZE, 0},
 	};
 	long n_rotatetime = 10;//DEFAULT_LOG_ROTATETIME
-	const char* log_fmt = "%Y-%m-%d-%H-%M-%S";// DEFAULT_LOG_FMT;
+	const char* log_fmt = "%Y%m%d%H%M%S";// DEFAULT_LOG_FMT;
 	init_log(DEFAULT_LOG_PATH, log_fmt, DEFAULT_LOG_EXT, DEFAULT_LOG_CONS,
 		n_rotatetime, LOG_VERBOSE, DEFAULT_LOG_LIMIT_SIZE, largl, sizeof(largl) / sizeof(*largl));
 	for (size_t i = 0; i < 100; i++)
